@@ -1,0 +1,11 @@
+[Core]
+Name = Duo2fa
+Module = duo2fa
+
+[Documentation]
+Description = This is a cmdfilter plugin that offers admins and plugin developers the ability to restrict commands with two-factor auth via Duo
+
+[Python]
+Version = 3
+
+
