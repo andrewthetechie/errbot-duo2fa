@@ -1,8 +1,8 @@
 import contextlib
 import inspect
 import uuid
-import argparse
 
+from argparse import ArgumentParser
 from functools import lru_cache
 from decouple import config
 from errbot import BotPlugin
@@ -13,6 +13,25 @@ from errbot.utils import ValidationException
 from duo_client import Auth
 from typing import Mapping
 from typing import Tuple
+
+
+class ArgumentParserError(Exception): pass
+
+
+def error(message: str) -> None:
+    """
+    error is used to monkeypatch ArgumentParser.error so that our argparse doesnt exit
+
+    Args:
+        message (str): The error message
+
+    Returns:
+        None
+
+    Raises:
+        ArgumentParserError
+    """
+    raise ArgumentParserError(message)
 
 
 class Duo2fa(BotPlugin):
@@ -175,82 +194,95 @@ class Duo2fa(BotPlugin):
             if cmd not in filtered_commands:
                 return msg, cmd, args
 
-            # at this point, we know this cmd is filtered and we need to 2fa the user
-            user_email = self.get_user_email(msg.frm.user_id)
-            try:
-                user_preauth, message = self.preauth_user(user_email)
+        # at this point, we know this cmd is filtered and we need to 2fa the user
+        # we're going to do preauth first as that will tell us whether we have a valid email or if we even need to
+        user_email = self.get_user_email(msg.frm.user_id)
+        if user_email == "Unsupported Backend":
+            self.log.error("Unsupported backed for user email lookup. Unable to do Duo 2fa ")
+            self.send(
+                msg.to,
+                test="Fatal error: Your backend does not support emails. All Duo 2fa commands will fail. "
+                     "Contact your bot admins to disable Duo 2fa",
+                in_reply_to=msg
 
-                # deny means that duo has denied this email auth.
-                if user_preauth == "deny":
-                    self.log.debug(f"{user_email} denied by Duo for {cmd}")
-                    self.send(
-                        msg.to,
-                        text=f"You are not authorized to auth to Duo at this time. Please contact your Duo admin."
-                             f"\nError message: {message}",
-                        in_reply_to=msg
-                    )
-                    return None, None, None
+            )
+            return None, None, None
+        try:
+            user_preauth, message = self.preauth_user(user_email)
+        except RuntimeError as error:
+            self.log.debug(f"Error talking to Duo api {error}")
+            self.send(
+                msg.to,
+                text=f"Error when talking to the Duo api {error}",
+                in_reply_to=msg
+            )
+            return None, None, None
 
-                # enroll means the user isn't in Duo
-                if user_preauth == "enroll":
-                    self.log.debug(f"{user_email} is not enrolled in Duo")
-                    self.send(
-                        msg.to,
-                        text=f"You are not enrolled in Duo. Please contact your Duo admin.\nUser Email: {user_email}",
-                        in_reply_to=msg
-                    )
-                    return None, None, None
+        # deny means that duo has denied this email auth.
+        if user_preauth == "deny":
+            self.log.debug(f"{user_email} denied by Duo for {cmd}")
+            self.send(
+                msg.to,
+                text=f"You are not authorized to auth to Duo at this time. Please contact your Duo admin."
+                     f"\nError message: {message}",
+                in_reply_to=msg
+            )
+            return None, None, None
 
-                # allow means duo has allowed this user without 2fa, maybe based on remember me rules
-                if user_preauth == "allow":
-                    self.log.debug(f"{user_email} allowed without 2fa by duo for {cmd}")
-                    return msg, cmd, args
+        # enroll means the user isn't in Duo
+        if user_preauth == "enroll":
+            self.log.debug(f"{user_email} is not enrolled in Duo")
+            self.send(
+                msg.to,
+                text=f"You are not enrolled in Duo. Please contact your Duo admin.\nUser Email: {user_email}",
+                in_reply_to=msg
+            )
+            return None, None, None
 
-                # auth means that we can do an auth with this user.
-                if user_preauth == "auth":
-                    self.log.debug(f"{user_email} needs to 2fa auth via Duo")
-                    flag_parser = argparse.ArgumentParser()
-                    flag_parser.add_argument("--2fa", action="store_true", dest="twofa")
-                    flag_parser.parse_known_args(args.split(" "))
-                    if not flag_parser.twofa:
-                        self.send(
-                            msg.to,
-                            text=f"This command requires Duo Two Factor. Rerun this command with --2fa.\n"
-                                 f"Your account supports the following 2fa methods: {message}. You can specify your"
-                                 f"preferred 2fa method after --2fa like this `--2fa sms`. Just sending --2fa is the"
-                                 f"same as --2fa auto",
-                            in_reply_to=msg
-                        )
-                        return None, None, None
-                    # ok, we have at least --2fa. Lets check if they sent along any text with it
-                    parser = argparse.ArgumentParser()
-                    parser.add_argument("--2fa",
-                                        action="store",
-                                        dest="twofa",
-                                        choices=['push', 'auto', 'phone', 'sms'],
-                                        default="auto"
-                                        )
-                    parser.parse_known_args(args.split(" "))
-                    twofa_method = parser.twofa
-                    twofa_result, message = self.auth_user(user_email, twofa_method)
-                    if twofa_result == "deny":
-                        self.send(
-                            msg.to,
-                            text=f"Your Duo 2FA auth failed.\nError message: {message}",
-                            in_reply_to=msg
-                        )
-                        return None, None, None
-                    if twofa_result == "allow":
-                        return msg, cmd, args
+        # allow means duo has allowed this user without further auth
+        if user_preauth == "allow":
+            self.log.debug(f"{user_email} allowed without 2fa by duo for {cmd}")
+            return msg, cmd, args
 
-            except RuntimeError as error:
-                self.log.debug(f"Error talking to Duo api {error}")
+        # auth means that we can do an auth with this user.
+        if user_preauth == "auth":
+            self.log.debug(f"{user_email} needs to 2fa auth via Duo for {cmd}")
+            if "--2fa" not in args:
                 self.send(
                     msg.to,
-                    text=f"Error when talking to the Duo api {error}",
+                    text=f"This command requires Duo Two Factor. Rerun this command with --2fa.\n"
+                         f"You can specify your preferred 2fa method after --2fa like this `--2fa sms`. "
+                         f"Just sending --2fa is the same as --2fa auto. Allowed 2fa Methods:\n"
+                         f"auto\npush\nphone\nsms",
                     in_reply_to=msg
                 )
                 return None, None, None
+
+            # ok, we have at least --2fa. Lets check if they sent along a 2fa method with it
+            parser = ArgumentParser()
+            parser.add_argument("--2fa",
+                                action="store",
+                                dest="twofa",
+                                choices=['push', 'auto', 'phone', 'sms'],
+                                default="auto"
+                                )
+            try:
+                parsed_args, _ = parser.parse_known_args(args.split(" "))
+                twofa_method = parsed_args.twofa
+            except ArgumentParserError:
+                twofa_method = "auto"
+
+            twofa_result, message = self.auth_user(user_email, twofa_method)
+            if twofa_result == "deny":
+                self.send(
+                    msg.to,
+                    text=f"Your Duo 2FA auth failed.\nError message: {message}",
+                    in_reply_to=msg
+                )
+                return None, None, None
+            if twofa_result == "allow":
+                return msg, cmd, args
+
         return None, None, None
 
     # Helper Functions
@@ -338,8 +370,11 @@ class Duo2fa(BotPlugin):
         Returns:
             Tuple(str, str) - preauth status and message
         """
-        # TODO: write preauth method using https://duo.com/docs/authapi#/preauth
-        return "allow", ""
+        duo_auth_api = Auth(ikey=self.config['DUO_INT_KEY'],
+                            skey=self.config['DUO_SECRET_KEY'],
+                            host=self.config['DUO_API_HOST'])
+        response = duo_auth_api.preauth(username=user_email)
+        return response['result'], response['status_msg']
 
     def auth_user(self, user_email: str, factor: str = "auto") -> Tuple[str, str]:
         """
@@ -351,5 +386,8 @@ class Duo2fa(BotPlugin):
         Returns:
             Tuple(str, str) - Auth result and message
         """
-        # TODO: write auth method using https://duo.com/docs/authapi#/auth
-        return "allow", ""
+        duo_auth_api = Auth(ikey=self.config['DUO_INT_KEY'],
+                            skey=self.config['DUO_SECRET_KEY'],
+                            host=self.config['DUO_API_HOST'])
+        response = duo_auth_api.auth(username=user_email, factor=factor)
+        return response['result'], response['status_msg']
