@@ -200,7 +200,7 @@ class Duo2fa(BotPlugin):
             None
         """
         self.log.debug(f"Clearing email lookup cache @ {msg.frm} request")
-        self.get_user_email.cache_clear()
+        self.get_email_via_api.cache_clear()
         self.send(
             msg.to,
             text="Email Lookup Cache cleared",
@@ -220,7 +220,7 @@ class Duo2fa(BotPlugin):
         Returns:
             None
         """
-        cache_info = self.get_user_email.cache_info()
+        cache_info = self.get_email_via_api.cache_info()
         self.send(
             msg.to,
             text=f"Email Lookup Cache Info\nHits: {cache_info.hits}\n"
@@ -251,11 +251,12 @@ class Duo2fa(BotPlugin):
         Returns:
             Union((ErrbotMessage, str, Dict), (None, None, None))
         """
-
+        self.log.debug(f"Start of filter {cmd} {args}")
         # right at the beginning, lets parse out the 2fa args, which will strip them from the args string as well
         # this lets us remove --2fa [method] from all cmds, in case someone passes it on a command that doesn't require
         # --2fa
         twofa_method, args = self.parse_2fa_args(args)
+        self.log.debug(f"after parse {cmd} {args}")
 
         if dry_run:
             return msg, cmd, args
@@ -268,20 +269,19 @@ class Duo2fa(BotPlugin):
         # at this point, we know this cmd is filtered and we need to 2fa the user
         # if twofa_method is None, then they didnt pass --2fa
         if twofa_method is None:
-            if "--2fa " not in args:
-                self.send(
-                    msg.to,
-                    text=f"This command requires Duo Two Factor. Rerun this command with --2fa.\n"
-                         f"You can specify your preferred 2fa method after --2fa like this `--2fa sms`. "
-                         f"Just sending --2fa is the same as --2fa auto. Allowed 2fa Methods:\n"
-                         f"auto\npush\nphone\nsms",
-                    in_reply_to=msg
-                )
-                return None, None, None
+            self.send(
+                msg.to,
+                text="This command requires Duo Two Factor. Rerun this command with --2fa.\n"
+                     "You can specify your preferred 2fa method after --2fa like this `--2fa sms`\n"
+                     "Just sending --2fa is the same as --2fa auto. Allowed 2fa Methods:\n"
+                     "auto\npush\nphone\nsms",
+                in_reply_to=msg
+            )
+            return None, None, None
 
         # we have --2fa and method
         # we're going to do preauth first as that will tell us whether we have a valid email or if we even need to auth
-        user_email = self.get_user_email(msg.frm.user_id)
+        user_email = self.get_user_email(msg.frm)
 
         if user_email == "Unsupported Backend":
             self.log.error("Unsupported backed for user email lookup. Unable to do Duo 2fa ")
@@ -304,6 +304,8 @@ class Duo2fa(BotPlugin):
                 in_reply_to=msg
             )
             return None, None, None
+
+        self.log.debug(f"LOOK: {user_preauth}")
 
         # deny means that duo has denied this email auth.
         if user_preauth == "deny":
@@ -405,15 +407,21 @@ class Duo2fa(BotPlugin):
             except KeyError as error_msg:
                 self.log.error(f"Tried to remove {command} that is not in filtered_commands. Error: {error_msg}")
 
-    @lru_cache(maxsize=256)
-    def get_user_email(self, user_id) -> str:
+    def get_user_email(self, person) -> str:
         """
         Turns a Person object into their email. Only works for the slack backend at this time
         Args:
-            user_id (str): Id of the user to get the nickname from
+            person (): errbot Identitidy
         Returns:
             str - Email for the user, or Unsupported Backend
         """
+
+        try:
+            return person.email()
+        except AttributeError:
+            # we're either running an older errbot-slack that doesnt have the _email merged in, or not the slack backend
+            pass
+
         bot_mode = self._bot.mode
         self.log.debug("get_user_email called")
         # in test mode, let's just return a junk email
@@ -424,16 +432,32 @@ class Duo2fa(BotPlugin):
         # ok, slack backend we need to do an API call
         if bot_mode == "slack":
             self.log.debug(f"HelperPlugin::get_user_email in slack mode - querying slack for {user_id} email")
-            user_info = self._bot.api_call('users.info', user=user_id)
-            if user_info['ok']:
-                email = user_info['user']['email']
-                self.log.debug(f"get_user_email in slack mode - {user_id}>>{email}")
-                return email
-            else:
-                self.log.error(f"Slack error when looking up email for {user_id}")
-                return "Slack Error"
+            try:
+                return self.get_email_via_api(person.user_id())
+            except RuntimeError:
+                return "Slack API Error"
+
         self.log.debug(f"HelperPlugin::get_user_email in unknown mode - {bot_mode}. Returning Unsupported")
         return "Unsupported Backend"
+
+    @lru_cache(maxsize=256)
+    def get_email_via_api(self, user_id: str) -> str:
+        """
+        get_user_email uses the slack api to get a user's email by their user id
+        Args:
+            user_id (str): user id to look up
+
+        Returns:
+            str
+        """
+        user_info = self._bot.api_call('users.info', user=user_id)
+        if user_info['ok']:
+            email = user_info['user']['email']
+            self.log.debug(f"get_user_email in slack mode - {user_id}>>{email}")
+            return email
+        else:
+            self.log.error(f"Slack error when looking up email for {user_id}")
+            raise RuntimeError("Slack Error")
 
     @lru_cache(maxsize=4)
     def preauth_user(self, user_email: str) -> Tuple[str, str]:

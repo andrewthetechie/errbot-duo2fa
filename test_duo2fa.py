@@ -85,46 +85,6 @@ def test_remove_command(testbot):
     assert "require_2fa" not in plugin['filtered_commands']
 
 
-def test_get_user_email(testbot):
-    """
-    test get_user_email
-
-    """
-    # This test is a bit silly as in test mode, this method returns a static value.
-    # However, we also test the lru caching here
-    plugin = testbot.bot.plugin_manager.get_plugin_obj_by_name("Duo2fa")
-
-    testbot.push_message("!twofa email cache info")
-    msg = testbot.pop_message()
-    assert msg == "Email Lookup Cache Info\nHits: 0\nMisses: 0\n" \
-                  "Max Size 256\nCurrent Size: 0"
-
-    email = plugin.get_user_email(user_id="123456")
-    assert email == "test@test.com"
-
-    testbot.push_message("!twofa email cache info")
-    msg = testbot.pop_message()
-    assert msg == "Email Lookup Cache Info\nHits: 0\nMisses: 1\n" \
-                  "Max Size 256\nCurrent Size: 1"
-
-    email = plugin.get_user_email(user_id="123456")
-    assert email == "test@test.com"
-
-    testbot.push_message("!twofa email cache info")
-    msg = testbot.pop_message()
-    assert msg == "Email Lookup Cache Info\nHits: 1\nMisses: 1\n" \
-                  "Max Size 256\nCurrent Size: 1"
-
-    testbot.push_message("!twofa email cache clear")
-    msg = testbot.pop_message()
-    assert msg == "Email Lookup Cache cleared"
-
-    testbot.push_message("!twofa email cache info")
-    msg = testbot.pop_message()
-    assert msg == "Email Lookup Cache Info\nHits: 0\nMisses: 0\n" \
-                  "Max Size 256\nCurrent Size: 0"
-
-
 def test_preauth_user(testbot):
     """
     tests preauth_user
@@ -262,13 +222,78 @@ def test_remove_2fa(testbot):
 # Test the cmdfilter
 def test_duo2fa_filter(testbot):
     """
-    Tests our cmdfilter
+    Tests duo2fa_filter
 
     """
-    # TODO: WRite these ttests. Need to make the mocker take different repsonses for auth and preauth, so we can hit all the states
+    plugin = testbot.bot.plugin_manager.get_plugin_obj_by_name("Duo2fa")
+    # monkeypatch the duo auth client
+    plugin.duo_auth_api = MockDuoAuthClient()
 
+    # we're going to use !twofa email cache clear for our testing command
+    plugin.add_command("twofa_email_cache_clear")
 
+    # test preauth duo error
+    plugin.duo_auth_api.preauth_raise_error = True
+    testbot.push_message("!twofa email cache clear --2fa")
+    msg = testbot.pop_message()
+    assert msg == "Fatal Error when talking to the Duo api Error raised"
 
+    # test preauth duo deny
+    plugin.duo_auth_api.preauth_raise_error = False
+    plugin.duo_auth_api.preauth_json = {"result": "deny", "status_msg": "Error message"}
+    testbot.push_message("!twofa email cache clear --2fa")
+    msg = testbot.pop_message()
+    assert msg == "Error: You are not authorized to auth to Duo at this time. Please contact your Duo admin." \
+                  "\nDuo Error message: Error message"
 
+    plugin.preauth_user.cache_clear()
+
+    # test preauth enroll
+    plugin.duo_auth_api.preauth_raise_error = False
+    plugin.duo_auth_api.preauth_json = {"result": "enroll", "status_msg": "Error message"}
+    testbot.push_message("!twofa email cache clear --2fa")
+    msg = testbot.pop_message()
+    assert msg == "Error: You are not enrolled in Duo. Please contact your Duo admin.\nUser Email: test@test.com"
+
+    plugin.preauth_user.cache_clear()
+
+    # test preauth allow
+    plugin.duo_auth_api.preauth_raise_error = False
+    plugin.duo_auth_api.preauth_json = {"result": "allow", "status_msg": "Error message"}
+    testbot.push_message("!twofa email cache clear --2fa")
+    msg = testbot.pop_message()
+    assert msg == "Email Lookup Cache cleared"
+
+    plugin.preauth_user.cache_clear()
+
+    # test preauth duo auth, auth errors
+    plugin.duo_auth_api.preauth_raise_error = False
+    plugin.duo_auth_api.preauth_json = {"result": "auth", "status_msg": "Error message"}
+    plugin.duo_auth_api.auth_raise_error = True
+    testbot.push_message("!twofa email cache clear --2fa")
+    msg = testbot.pop_message()
+    assert msg == "Fatal Error when talking to the Duo api Error raised"
+
+    plugin.preauth_user.cache_clear()
+
+    # test preauth duo auth, auth deny
+    plugin.duo_auth_api.preauth_raise_error = False
+    plugin.duo_auth_api.preauth_json = {"result": "auth", "status_msg": "Error message"}
+    plugin.duo_auth_api.auth_raise_error = False
+    plugin.duo_auth_api.auth_json = {"result": "deny", "status_msg": "Error message"}
+    testbot.push_message("!twofa email cache clear --2fa")
+    msg = testbot.pop_message()
+    assert msg == "Your Duo 2FA auth failed.\nError message: Error message"
+
+    plugin.preauth_user.cache_clear()
+
+    # test preauth duo auth, auth allow
+    plugin.duo_auth_api.preauth_raise_error = False
+    plugin.duo_auth_api.preauth_json = {"result": "auth", "status_msg": "Error message"}
+    plugin.duo_auth_api.auth_raise_error = False
+    plugin.duo_auth_api.auth_json = {"result": "allow", "status_msg": "Error message"}
+    testbot.push_message("!twofa email cache clear --2fa")
+    msg = testbot.pop_message()
+    assert msg == "Email Lookup Cache cleared"
 
 
