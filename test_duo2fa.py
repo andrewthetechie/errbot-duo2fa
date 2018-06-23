@@ -8,19 +8,24 @@ extra_plugin_dir = "."
 
 class MockDuoAuthClient(object):
     def __init__(self):
-        self.return_json = dict()
-        self.raise_error = False
-
-    def set_return_json(self, json):
-        self.return_json = json
+        self.preauth_json = dict()
+        self.auth_json = dict()
+        self.preauth_raise_error = False
+        self.auth_raise_error = False
+        self.preauth_call_count = 0
+        self.auth_call_count = 0
 
     def preauth(self, username):
-        if self.raise_error:
+        self.preauth_call_count += 1
+        if self.preauth_raise_error:
             raise RuntimeError("Error raised")
-        return self.return_json
+        return self.preauth_json
 
     def auth(self, username, factor):
-        return self.preauth(username=username)
+        self.auth_call_count += 1
+        if self.auth_raise_error:
+            raise RuntimeError("Error raised")
+        return self.auth_json
 
 
 # Tests for setup methods
@@ -121,27 +126,94 @@ def test_get_user_email(testbot):
 
 
 def test_preauth_user(testbot):
+    """
+    tests preauth_user
+
+    Returns:
+
+    """
     plugin = testbot.bot.plugin_manager.get_plugin_obj_by_name("Duo2fa")
     # monkeypatch the duo auth client
     plugin.duo_auth_api = MockDuoAuthClient()
-    plugin.duo_auth_api.set_return_json({"result": "pass", "status_msg": "pass"})
+    plugin.duo_auth_api.preauth_json = {"result": "pass", "status_msg": "pass"}
 
     result, message = plugin.preauth_user("test@test.com")
 
     assert result == "pass"
     assert message == "pass"
+    assert plugin.duo_auth_api.preauth_call_count == 1
+
+    # test caching
+    result, message = plugin.preauth_user("test@test.com")
+    assert result == "pass"
+    assert message == "pass"
+    assert plugin.duo_auth_api.preauth_call_count == 1
 
 
 def test_auth_user(testbot):
+    """
+    tests auth_user
+
+    """
     plugin = testbot.bot.plugin_manager.get_plugin_obj_by_name("Duo2fa")
     # monkeypatch the duo auth client
     plugin.duo_auth_api = MockDuoAuthClient()
-    plugin.duo_auth_api.set_return_json({"result": "pass", "status_msg": "pass"})
+    plugin.duo_auth_api.auth_json = {"result": "pass", "status_msg": "pass"}
 
     result, message = plugin.auth_user("test@test.com")
 
     assert result == "pass"
     assert message == "pass"
+
+
+def test_parse_2fa_args(testbot):
+    """
+    tests parse_2fa_args
+
+    """
+    plugin = testbot.bot.plugin_manager.get_plugin_obj_by_name("Duo2fa")
+
+    # test no 2fa
+    test_args = "stuff"
+    method, args = plugin.parse_2fa_args(test_args)
+    assert method is None
+    assert args == "stuff"
+
+    # test --2fa on end
+    test_args = "stuff --2fa"
+    method, args = plugin.parse_2fa_args(test_args)
+    assert method == "auto"
+    assert args == "stuff"
+
+    # test --2fa push
+    test_args = "stuff --2fa push"
+    method, args = plugin.parse_2fa_args(test_args)
+    assert method == "push"
+    assert args == "stuff"
+
+    # test --2fa SMS
+    test_args = "stuff --2fa SMS"
+    method, args = plugin.parse_2fa_args(test_args)
+    assert method == "sms"
+    assert args == "stuff"
+
+    # test --2fa push --otherflag
+    test_args = "stuff --2fa push --otherflag"
+    method, args = plugin.parse_2fa_args(test_args)
+    assert method == "push"
+    assert args == "stuff --otherflag"
+
+    # test --2fa --otherflag stuff
+    test_args = "stuff --2fa --otherflag stuff"
+    method, args = plugin.parse_2fa_args(test_args)
+    assert method == "auto"
+    assert args == "stuff --otherflag stuff"
+
+    # test --2fa --otherflag push
+    test_args = "stuff --2fa --otherflag push"
+    method, args = plugin.parse_2fa_args(test_args)
+    assert method == "auto"
+    assert args == "stuff --otherflag push"
 
 
 # Tests for botcmds
@@ -193,6 +265,7 @@ def test_duo2fa_filter(testbot):
     Tests our cmdfilter
 
     """
+    # TODO: WRite these ttests. Need to make the mocker take different repsonses for auth and preauth, so we can hit all the states
 
 
 

@@ -3,7 +3,6 @@ import inspect
 import uuid
 import hashlib
 
-from argparse import ArgumentParser
 from functools import lru_cache
 from decouple import config
 from errbot import BotPlugin
@@ -15,26 +14,6 @@ from errbot.botplugin import ValidationException
 from duo_client import Auth
 from typing import Mapping
 from typing import Tuple
-
-
-class ArgumentParserError(Exception):
-    pass
-
-
-def error(message: str) -> None:
-    """
-    error is used to monkeypatch ArgumentParser.error so that our argparse doesnt exit
-
-    Args:
-        message (str): The error message
-
-    Returns:
-        None
-
-    Raises:
-        ArgumentParserError
-    """
-    raise ArgumentParserError(message)
 
 
 class Duo2fa(BotPlugin):
@@ -272,6 +251,12 @@ class Duo2fa(BotPlugin):
         Returns:
             Union((ErrbotMessage, str, Dict), (None, None, None))
         """
+
+        # right at the beginning, lets parse out the 2fa args, which will strip them from the args string as well
+        # this lets us remove --2fa [method] from all cmds, in case someone passes it on a command that doesn't require
+        # --2fa
+        twofa_method, args = self.parse_2fa_args(args)
+
         if dry_run:
             return msg, cmd, args
 
@@ -281,25 +266,41 @@ class Duo2fa(BotPlugin):
                 return msg, cmd, args
 
         # at this point, we know this cmd is filtered and we need to 2fa the user
-        # we're going to do preauth first as that will tell us whether we have a valid email or if we even need to
+        # if twofa_method is None, then they didnt pass --2fa
+        if twofa_method is None:
+            if "--2fa " not in args:
+                self.send(
+                    msg.to,
+                    text=f"This command requires Duo Two Factor. Rerun this command with --2fa.\n"
+                         f"You can specify your preferred 2fa method after --2fa like this `--2fa sms`. "
+                         f"Just sending --2fa is the same as --2fa auto. Allowed 2fa Methods:\n"
+                         f"auto\npush\nphone\nsms",
+                    in_reply_to=msg
+                )
+                return None, None, None
+
+        # we have --2fa and method
+        # we're going to do preauth first as that will tell us whether we have a valid email or if we even need to auth
         user_email = self.get_user_email(msg.frm.user_id)
+
         if user_email == "Unsupported Backend":
             self.log.error("Unsupported backed for user email lookup. Unable to do Duo 2fa ")
             self.send(
                 msg.to,
-                test="Fatal error: Your backend does not support emails. All Duo 2fa commands will fail. "
+                test="Fatal error: Your backend does not support user emails. All Duo 2fa commands will fail. "
                      "Contact your bot admins to disable Duo 2fa",
                 in_reply_to=msg
 
             )
             return None, None, None
+
         try:
             user_preauth, message = self.preauth_user(user_email)
         except RuntimeError as error:
             self.log.debug(f"Error talking to Duo api {error}")
             self.send(
                 msg.to,
-                text=f"Error when talking to the Duo api {error}",
+                text=f"Fatal Error when talking to the Duo api {error}",
                 in_reply_to=msg
             )
             return None, None, None
@@ -309,8 +310,8 @@ class Duo2fa(BotPlugin):
             self.log.debug(f"{user_email} denied by Duo for {cmd}")
             self.send(
                 msg.to,
-                text=f"You are not authorized to auth to Duo at this time. Please contact your Duo admin."
-                     f"\nError message: {message}",
+                text=f"Error: You are not authorized to auth to Duo at this time. Please contact your Duo admin."
+                     f"\nDuo Error message: {message}",
                 in_reply_to=msg
             )
             return None, None, None
@@ -320,7 +321,7 @@ class Duo2fa(BotPlugin):
             self.log.debug(f"{user_email} is not enrolled in Duo")
             self.send(
                 msg.to,
-                text=f"You are not enrolled in Duo. Please contact your Duo admin.\nUser Email: {user_email}",
+                text=f"Error: You are not enrolled in Duo. Please contact your Duo admin.\nUser Email: {user_email}",
                 in_reply_to=msg
             )
             return None, None, None
@@ -333,32 +334,18 @@ class Duo2fa(BotPlugin):
         # auth means that we can do an auth with this user.
         if user_preauth == "auth":
             self.log.debug(f"{user_email} needs to 2fa auth via Duo for {cmd}")
-            if "--2fa" not in args:
+
+            try:
+                twofa_result, message = self.auth_user(user_email, twofa_method)
+            except RuntimeError as error:
+                self.log.debug(f"Error talking to Duo api {error}")
                 self.send(
                     msg.to,
-                    text=f"This command requires Duo Two Factor. Rerun this command with --2fa.\n"
-                         f"You can specify your preferred 2fa method after --2fa like this `--2fa sms`. "
-                         f"Just sending --2fa is the same as --2fa auto. Allowed 2fa Methods:\n"
-                         f"auto\npush\nphone\nsms",
+                    text=f"Fatal Error when talking to the Duo api {error}",
                     in_reply_to=msg
                 )
                 return None, None, None
 
-            # ok, we have at least --2fa. Lets check if they sent along a 2fa method with it
-            parser = ArgumentParser()
-            parser.add_argument("--2fa",
-                                action="store",
-                                dest="twofa",
-                                choices=['push', 'auto', 'phone', 'sms'],
-                                default="auto"
-                                )
-            try:
-                parsed_args, _ = parser.parse_known_args(args.split(" "))
-                twofa_method = parsed_args.twofa
-            except ArgumentParserError:
-                twofa_method = "auto"
-
-            twofa_result, message = self.auth_user(user_email, twofa_method)
             if twofa_result == "deny":
                 self.send(
                     msg.to,
@@ -366,6 +353,7 @@ class Duo2fa(BotPlugin):
                     in_reply_to=msg
                 )
                 return None, None, None
+
             if twofa_result == "allow":
                 return msg, cmd, args
 
@@ -447,7 +435,7 @@ class Duo2fa(BotPlugin):
         self.log.debug(f"HelperPlugin::get_user_email in unknown mode - {bot_mode}. Returning Unsupported")
         return "Unsupported Backend"
 
-    @lru_cache(maxsize=8)
+    @lru_cache(maxsize=4)
     def preauth_user(self, user_email: str) -> Tuple[str, str]:
         """
         Preauths a user against duo
@@ -473,3 +461,43 @@ class Duo2fa(BotPlugin):
         """
         response = self.duo_auth_api.auth(username=user_email, factor=factor)
         return response['result'], response['status_msg']
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def parse_2fa_args(args: str) -> Tuple[str, str]:
+        """
+        Parses the 2fa method out of args and returns the args string without 2fa in it
+        Args:
+            args (str): args to parse
+
+        Returns:
+            Tuple(str, str) - twofa_method, args without --2fa method
+        """
+
+        # if --2fa isnt in our args, return None and args unmodified
+        if "--2fa" not in args:
+            return None, args
+
+        # ok, we have at least --2fa. Lets check if they sent along a 2fa method with it
+        args_list = args.split(" ")
+        twofa_position = args_list.index("--2fa")
+        try:
+            # grab the next word after --2fa
+            method_pos = twofa_position + 1
+            twofa_method = args_list[method_pos]
+
+            # if its a flag (starts with --) then we want auto (they passed just --2fa)
+            if twofa_method.startswith("--"):
+                twofa_method = "auto"
+                method_pos = None
+        except IndexError:
+            # they pased just --2fa at the end of the args
+            twofa_method = "auto"
+            method_pos = None
+
+        # delete --2fa and the 2fa method from args
+        if method_pos is not None:
+            del args_list[method_pos]
+        del args_list[twofa_position]
+
+        return twofa_method.lower(), " ".join(args_list)
