@@ -1,21 +1,24 @@
 import contextlib
 import inspect
 import uuid
+import hashlib
 
 from argparse import ArgumentParser
 from functools import lru_cache
 from decouple import config
 from errbot import BotPlugin
 from errbot import botcmd
+from errbot import arg_botcmd
 from errbot import cmdfilter
 from errbot.backends.base import Message as ErrbotMessage
-from errbot.utils import ValidationException
+from errbot.botplugin import ValidationException
 from duo_client import Auth
 from typing import Mapping
 from typing import Tuple
 
 
-class ArgumentParserError(Exception): pass
+class ArgumentParserError(Exception):
+    pass
 
 
 def error(message: str) -> None:
@@ -39,14 +42,14 @@ class Duo2fa(BotPlugin):
     This implements duo 2fa as a cmdfilter for other plugin commands
     """
     # Plugin Setup Methods
-    def __hash__(self):
+    def __hash__(self) -> int:
         """
         Returns a hash of self.cache_id with Duo2fa, needed for LRU caching
 
         Returns:
             hash
         """
-        return hash(str(type(self)) + str(self.cache_id))
+        return hash(hashlib.md5(f"Duo2fa-{self.cache_id}".encode('utf-8')).hexdigest())
 
     def __init__(self, bot, name=None) -> None:
         """
@@ -56,6 +59,9 @@ class Duo2fa(BotPlugin):
                          name=name)
         # cache_id is used to make the object uniquely hashable for lru caching
         self.cache_id = str(uuid.uuid4())
+
+        # this is our duo auth client. Setting it to None for now, will set it up in activate
+        self.duo_auth_api = None
 
     def activate(self)->None:
         """
@@ -68,6 +74,10 @@ class Duo2fa(BotPlugin):
         if 'filtered_commands' not in self:
             self['filtered_commands'] = set()
 
+        self.duo_auth_api = Auth(ikey=self.config['DUO_INT_KEY'],
+                                 skey=self.config['DUO_SECRET_KEY'],
+                                 host=self.config['DUO_API_HOST'])
+
     def configure(self, configuration: Mapping = dict())->None:
         """
         Configure gathers configuration from the user or from the environment and configures the plugin
@@ -78,6 +88,9 @@ class Duo2fa(BotPlugin):
         Returns:
             None
         """
+        if configuration is None:
+            configuration = dict()
+
         if 'DUO_API_HOST' not in configuration:
             configuration['DUO_API_HOST'] = config("DUO_API_HOST",
                                                    cast=str)
@@ -123,7 +136,80 @@ class Duo2fa(BotPlugin):
 
     # Plugin Commands
     @botcmd(admin_only=True)
-    def twofa_clear_email_cache(self, msg: ErrbotMessage, args: Mapping) -> None:
+    @arg_botcmd(
+        'command',
+        type=str,
+        help="Command to require 2fa for"
+    )
+    def require_2fa(self, msg:ErrbotMessage, command: str) -> None:
+        """
+        require 2fa allows bot admins to add a command to our 2fa filter
+
+        Args:
+            msg (ErrbotMessage): Message passed along by the bot
+            command (str): The command to add
+
+        Returns:
+            None
+        """
+        if command not in self._bot.commands:
+            self.send(msg.to,
+                      text=f"{command} not in our bot's command list. Make sure you are adding the command based on "
+                           f"the python function name for the plugin",
+                      in_reply_to=msg)
+            return
+
+        with self.stored('filtered_commands') as filtered_commands:
+            if command in filtered_commands:
+                self.send(
+                    msg.to,
+                    text=f"{command} already requires 2fa",
+                    in_reply_to=msg
+                )
+                return
+
+        self.add_command(command)
+        self.send(msg.to,
+                  f"{command} now requires 2fa",
+                  in_reply_to=msg)
+        return
+
+    @botcmd(admin_only=True)
+    @arg_botcmd(
+        'command',
+        type=str,
+        help="Command to require 2fa for"
+    )
+    def remove_2fa(self, msg:ErrbotMessage, command: str) -> None:
+        """
+        remove 2fa allows bot admins to remove a command from our 2fa filter
+
+        Args:
+            msg (ErrbotMessage): Message passed along by the bot
+            command (str): The command to add
+
+        Returns:
+            None
+        """
+        with self.stored('filtered_commands') as filtered_commands:
+            if command not in filtered_commands:
+                self.send(
+                    msg.to,
+                    text=f"{command} does not require 2fa",
+                    in_reply_to=msg
+                )
+                return None
+
+        self.remove_command(command)
+        self.send(
+            msg.to,
+            text=f"{command} no longer requires 2fa",
+            in_reply_to=msg
+        )
+        return
+
+    @botcmd(admin_only=True)
+    def twofa_email_cache_clear(self, msg: ErrbotMessage, args: Mapping) -> None:
         """
         This is an admin only command that will clear the email lookup cache
 
@@ -134,7 +220,7 @@ class Duo2fa(BotPlugin):
         Returns:
             None
         """
-        self.log.debug(f"Clearing email lookup cache @ {msg.frm.user_id} request")
+        self.log.debug(f"Clearing email lookup cache @ {msg.frm} request")
         self.get_user_email.cache_clear()
         self.send(
             msg.to,
@@ -310,10 +396,9 @@ class Duo2fa(BotPlugin):
             command (str): The command to filter
 
         """
-        super.log.debug(f"add_command called from {inspect.stack()[1][3]} with {command}")
-        with self.lock:
-            with self.stored('filtered_commands') as cmds:
-                cmds.add(command)
+        self.log.debug(f"add_command called from {inspect.stack()[1][3]} with {command}")
+        with self.stored('filtered_commands') as cmds:
+            cmds.add(command)
 
     def remove_command(self,
                        command: str)->None:
@@ -325,10 +410,12 @@ class Duo2fa(BotPlugin):
             command (str): The command to filter
 
         """
-        super.log.debug(f"remove_command called from {inspect.stack()[1][3]} with {command}")
-        with self.lock:
-            with self.stored('filtered_commands') as cmds:
-                del cmds[command]
+        self.log.debug(f"remove_command called from {inspect.stack()[1][3]} with {command}")
+        with self.stored('filtered_commands') as cmds:
+            try:
+                cmds.remove(command)
+            except KeyError as error_msg:
+                self.log.error(f"Tried to remove {command} that is not in filtered_commands. Error: {error_msg}")
 
     @lru_cache(maxsize=256)
     def get_user_email(self, user_id) -> str:
@@ -370,10 +457,8 @@ class Duo2fa(BotPlugin):
         Returns:
             Tuple(str, str) - preauth status and message
         """
-        duo_auth_api = Auth(ikey=self.config['DUO_INT_KEY'],
-                            skey=self.config['DUO_SECRET_KEY'],
-                            host=self.config['DUO_API_HOST'])
-        response = duo_auth_api.preauth(username=user_email)
+
+        response = self.duo_auth_api.preauth(username=user_email)
         return response['result'], response['status_msg']
 
     def auth_user(self, user_email: str, factor: str = "auto") -> Tuple[str, str]:
@@ -386,8 +471,5 @@ class Duo2fa(BotPlugin):
         Returns:
             Tuple(str, str) - Auth result and message
         """
-        duo_auth_api = Auth(ikey=self.config['DUO_INT_KEY'],
-                            skey=self.config['DUO_SECRET_KEY'],
-                            host=self.config['DUO_API_HOST'])
-        response = duo_auth_api.auth(username=user_email, factor=factor)
+        response = self.duo_auth_api.auth(username=user_email, factor=factor)
         return response['result'], response['status_msg']

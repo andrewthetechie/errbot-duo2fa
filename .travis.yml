@@ -7,4 +7,4 @@ install:
 env:
   - DUO_API_HOST=test DUO_INT_KEY=test DUO_SECRET_KEY=test
 script:
-  - pytest
+  - pytest -n auto
