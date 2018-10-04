@@ -29,7 +29,7 @@ The bot will then pause while the user completes authentication. If authenticati
 
 	./do stuff --flag thing --2fa
 	** User auths via default duo method
-	Bot: Did stuff with thing! 
+	Bot: Did stuff with thing!
 
 # Configuration
 
@@ -65,7 +65,7 @@ To remove a command from requiring 2fa:
         def activate(self):
                 super().activate()  # <-- needs to be *before* get_plugin
 				self.get_plugin('Duo2fa').add_command('foo_bar')
-				// Do some other stuff and decide to remove the comand
+				// Do some other stuff and decide to remove the command
 				//
                 self.get_plugin('Duo2fa').remove_command('foo_bar')
 
@@ -75,5 +75,4 @@ To remove a command from requiring 2fa:
 
 ## Admin Management from the bot
 
-You can add and remove commands from the chat using the built in `require 2fa` and `remove_2fa` commands. See help for more usage info on these commands.
-
+You can add and remove commands from the chat using the built in `require_2fa` and `remove_2fa` commands. See help for more usage info on these commands.
