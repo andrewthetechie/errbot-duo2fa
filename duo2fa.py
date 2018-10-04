@@ -238,7 +238,7 @@ class Duo2fa(BotPlugin):
         prompt the user to 2fa as appropriate
 
         Args:
-            msg: the ErrbotMessage objevt
+            msg: the ErrbotMessage object
             cmd (str): The command name itself
             args (str): Args passed to the command
             dry_run (boolean): True when this is a dry run
@@ -267,7 +267,7 @@ class Duo2fa(BotPlugin):
                 return msg, cmd, args
 
         # at this point, we know this cmd is filtered and we need to 2fa the user
-        # if twofa_method is None, then they didnt pass --2fa
+        # if twofa_method is None, then they didn't pass --2fa
         if twofa_method is None:
             self.send(
                 msg.to,
@@ -411,7 +411,7 @@ class Duo2fa(BotPlugin):
         """
         Turns a Person object into their email. Only works for the slack backend at this time
         Args:
-            person (): errbot Identitidy
+            person (): errbot Identity
         Returns:
             str - Email for the user, or Unsupported Backend
         """
@@ -419,7 +419,7 @@ class Duo2fa(BotPlugin):
         try:
             return person.email()
         except AttributeError:
-            # we're either running an older errbot-slack that doesnt have the _email merged in, or not the slack backend
+            # we're either running an older errbot-slack that doesn't have the _email merged in, or not the slack backend
             pass
 
         bot_mode = self._bot.mode
@@ -429,7 +429,7 @@ class Duo2fa(BotPlugin):
             self.log.debug("get_user_email in test mode - returning test@test.com")
             return "test@test.com"
 
-        # ok, slack backend we need to do an API call
+        # OK, slack backend we need to do an API call
         if bot_mode == "slack":
             self.log.debug(f"HelperPlugin::get_user_email in slack mode - querying slack for {user_id} email")
             try:
@@ -498,7 +498,7 @@ class Duo2fa(BotPlugin):
             Tuple(str, str) - twofa_method, args without --2fa method
         """
 
-        # if --2fa isnt in our args, return None and args unmodified
+        # if --2fa isn't in our args, return None and args unmodified
         if "--2fa" not in args:
             return None, args
 
@@ -515,7 +515,7 @@ class Duo2fa(BotPlugin):
                 twofa_method = "auto"
                 method_pos = None
         except IndexError:
-            # they pased just --2fa at the end of the args
+            # they passed just --2fa at the end of the args
             twofa_method = "auto"
             method_pos = None
 
