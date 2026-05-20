@@ -1,2 +1,2 @@
 python-decouple>=3.1
-duo_client>=3.3.0
+duo_client>=5.6.1
